@@ -19,4 +19,14 @@ public interface IDynamicWrapper
     /// The underlying object that this wrapper encapsulates.
     /// </summary>
     public object Instance { get; }
+
+    /// <summary>
+    /// The interface that the wrapper implements.
+    /// </summary>
+    public Type WrapperInterfaceType { get; }
+
+    /// <summary>
+    /// The interface that the instance object implements.
+    /// </summary>
+    public Type InstanceInterfaceType { get; }
 }
