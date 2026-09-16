@@ -21,6 +21,7 @@ public class DynamicWrapper
     private readonly record struct InteropData(string SourceModId, Type TargetInterface, DynamicWrapperFactory Factory, IDictionary<string, Delegate> Delegates) { public override readonly string ToString() => $"\"{SourceModId}\", {TargetInterface}, {Factory.Target}"; }
 
     private static readonly Dictionary<string, HashSet<Type>> DeclaredInterfaces = [];
+    private static readonly Dictionary<Type, string> ModIdsByType = [];
     private static readonly Dictionary<InteropKey, InteropData> InteropLookup = [];
 
     /// <summary>
@@ -129,6 +130,7 @@ public class DynamicWrapper
         if (targetInterface != null || TryGetTypeFromModId(targetModId, sourceInterface!.Name, targetInterfaceName, out targetInterface))
         {
             types.Add(targetInterface);
+            ModIdsByType[targetInterface] = targetModId;
 
             if (sourceModId != null && sourceInterface != null)
             {
@@ -188,6 +190,7 @@ public class DynamicWrapper
         {
             DeclaredInterfaces[sourceModId] = [sourceInterface];
         }
+        ModIdsByType[sourceInterface] = sourceModId;
     }
 
 
@@ -406,7 +409,7 @@ public class DynamicWrapper
     /// <returns>Either an <see cref="IDynamicWrapper"/> implenting an interface that <paramref name="targetModId"/> can consume, or the object instance itself if it is native to <paramref name="targetModId"/>.</returns>
     /// <exception cref="InvalidOperationException">The interface <typeparamref name="T"/> has not been registered by <paramref name="targetModId"/>.</exception>
     [return: NotNullIfNotNull(nameof(objectToWrap))]
-    public static T? Wrap<T>(string targetModId, object? objectToWrap, Type? sourceInterface = null)
+    public static T? Wrap<T>(string? targetModId, object? objectToWrap, Type? sourceInterface = null)
     {
         // WARNING: If you change this method signature, need to update the Linq query in static ctor (look for the matching WARNING comment) and associated IL in CreateWrapperFactory
         return (T?)WrapInternal(targetModId, objectToWrap, typeof(T), sourceInterface);
@@ -416,10 +419,13 @@ public class DynamicWrapper
     /// <param name="targetInterface">The interface to wrap <paramref name="objectToWrap"/> with. This interface must be native to <paramref name="targetModId"/>. If <see langword="null"/>, it will be auto-detected.</param>
     /// <param name="returnNullIfNotWrapped">If <see langword="true"/>, returns <see langword="null"/> when the object is not able to be wrapped. Otherwise, throws an <see cref="InvalidOperationException"/>.</param>
     [return: NotNullIfNotNull(nameof(objectToWrap))]
-    private static object? WrapInternal(string targetModId, object? objectToWrap, Type? targetInterface, Type? sourceInterface = null, bool returnNullIfNotWrapped = false)
+    private static object? WrapInternal(string? targetModId, object? objectToWrap, Type? targetInterface, Type? sourceInterface = null, bool returnNullIfNotWrapped = false)
     {
         if (objectToWrap == null)
             return null;
+
+        if (targetModId == null && targetInterface == null)
+            throw new InvalidOperationException($"No {nameof(targetModId)} or {nameof(targetInterface)} supplied. At least one of these is required in order to produce a result.");
 
         Type objType = objectToWrap.GetType();
 
@@ -454,10 +460,21 @@ public class DynamicWrapper
             sourceInterface = wrapper.InstanceInterfaceType;
         }
 
-        if ((sourceInterface != null && InteropLookup.TryGetValue(new(targetModId, sourceInterface), out InteropData data)
-                || objectToWrap is IWrappable wrappable && wrappable.TargetModId == targetModId && InteropLookup.TryGetValue(new(targetModId, wrappable.InterfaceType), out data)
-                || InteropLookup.TryGetValue(new(targetModId, objType), out data))
-            && (targetInterface == null || targetInterface == data.TargetInterface))
+        IWrappable? wrappable = objectToWrap as IWrappable;
+
+        if (targetModId == null
+                && targetInterface != null // Already known to be not-null here, but helps nullability tracking
+                && (wrappable != null
+                        && InteropLookup.TryGetValue(new(wrappable.TargetModId, wrappable.InterfaceType), out InteropData data)
+                        && data.TargetInterface == targetInterface
+                        && (targetModId = wrappable.TargetModId) == targetModId // Ugly, but this guarantees assignment of targetModId (then evaluates to true)
+                    || ModIdsByType.TryGetValue(targetInterface, out targetModId)
+                        && InteropLookup.TryGetValue(new(targetModId, objType), out data))
+            || targetModId != null
+                && (sourceInterface != null && InteropLookup.TryGetValue(new(targetModId, sourceInterface), out data)
+                    || wrappable != null && wrappable.TargetModId == targetModId && InteropLookup.TryGetValue(new(targetModId, wrappable.InterfaceType), out data)
+                    || InteropLookup.TryGetValue(new(targetModId, objType), out data))
+                && (targetInterface == null || targetInterface == data.TargetInterface))
         {
             if (objType.IsAssignableTo(data.TargetInterface))
             {
@@ -468,6 +485,9 @@ public class DynamicWrapper
 
         if (returnNullIfNotWrapped)
             return null!; // internal use only
+
+        if (targetModId == null)
+            throw new InvalidOperationException($"No {nameof(targetModId)} supplied, and the type '{objectToWrap.GetType()}' has not been registered with any mods for interface {targetInterface!.FullName}.");
 
         throw new InvalidOperationException($"The type '{objectToWrap.GetType()}' has not been registered with {targetModId}{(targetInterface == null ? "" : $" and target interface '{targetInterface}'")}. You must call {nameof(DynamicWrapper)}.{nameof(RegisterType)}() first.");
     }
@@ -505,9 +525,10 @@ public class DynamicWrapper
         return false;
     }
 
-    /// <inheritdoc cref="TryWrap(string, object?, Type?, out object?)"/>
     /// <typeparam name="T">The interface to wrap <paramref name="objectToWrap"/> with. This interface must be native to <paramref name="targetModId"/>.</typeparam>
-    public static bool TryWrap<T>(string targetModId, object? objectToWrap, [NotNullWhen(true)] out T? value)
+    /// <param name="targetModId">The modId that is the intended recipient of <paramref name="objectToWrap"/>. If not known, supply <see langword="null"/>, and it will seek the target mod using type <typeparamref name="T"/>.</param>
+    /// <inheritdoc cref="TryWrap(string, object?, Type?, out object?)"/>
+    public static bool TryWrap<T>(string? targetModId, object? objectToWrap, [NotNullWhen(true)] out T? value)
     {
         if (objectToWrap != null)
         {
