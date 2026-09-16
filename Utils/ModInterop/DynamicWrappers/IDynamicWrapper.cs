@@ -23,10 +23,10 @@ public interface IDynamicWrapper
     /// <summary>
     /// The interface that the wrapper implements.
     /// </summary>
-    public Type WrapperInterfaceType { get; }
+    public Type WrapperInterface { get; }
 
     /// <summary>
     /// The interface that the instance object implements.
     /// </summary>
-    public Type InstanceInterfaceType { get; }
+    public Type InstanceInterface { get; }
 }

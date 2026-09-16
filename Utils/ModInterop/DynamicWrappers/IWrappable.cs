@@ -3,11 +3,11 @@
 namespace BaseLib.Utils.ModInterop.DynamicWrappers;
 
 /// <summary>
-/// Indicates that this object is intended to be wrapped for consumption by a specific mod.
+/// Indicates that this object is intended to be wrapped for consumption by a specific mod. A type that implements this interface does not need to be registered (though it's SourceInterface still needs to be).
 /// </summary>
 /// <remarks>
 /// Recommended to implement this on an <see cref="AbstractModel"/> that is being used as a hook listener for custom hooks.
-/// If the hook listener filters models using OfTypeDynamic&lt;ICustomHook&gt;(), this will be picked up.
+/// If the hook listener filters models using OfTypeDynamic&lt;ICustomHook&gt;(), then this will be included.
 /// </remarks>
 public interface IWrappable
 {
@@ -17,8 +17,7 @@ public interface IWrappable
     public string TargetModId { get; }
 
     /// <summary>
-    /// The registered mirror interface that this object implements. Providing this to <see cref="DynamicWrapper.Wrap{T}(string, object, Type?)"/>
-    /// can help with finding a wrapper, even if the concrete type itself is not registered.
+    /// The registered mirror interface that this object implements.
     /// </summary>
-    public Type InterfaceType { get; }
+    public Type SourceInterface { get; }
 }
