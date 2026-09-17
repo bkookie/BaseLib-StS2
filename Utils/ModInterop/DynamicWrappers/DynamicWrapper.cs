@@ -3,6 +3,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Modding;
 
 namespace BaseLib.Utils.ModInterop.DynamicWrappers;
 
@@ -15,7 +16,22 @@ namespace BaseLib.Utils.ModInterop.DynamicWrappers;
 /// </remarks>
 public class DynamicWrapper
 {
-    internal static Dictionary<string, List<Assembly>> loadedModAssemblies = null!; // keep this alive to allow a mod to declare and register their interfaces at their leisure. Otherwise would need to enforce the attribute to control all registration.
+    private static Dictionary<string, List<Assembly>> LoadedModAssemblies
+    {
+        get
+        {
+            if (field == null)
+            {
+                // Maybe should wait until AssemblyInfo.Init() instead, to give time for multi-assembly mods to register all their assemblies.
+                if (ModManager.State != ModManagerState.Initialized)
+                    throw new InvalidOperationException($"{nameof(ModManager)} has not initialized yet (current state is '{ModManager.State}'). Please wait until all mods have been loaded.");
+
+                // Not using ModInterop or WhatMod's assembly list; they may not be initialized in time.
+                field = ModManager.GetLoadedMods().Where(mod => mod.manifest?.id != null).ToDictionary(mod => mod.manifest!.id!, mod => mod.assemblies);
+            }
+            return field;
+        }
+    }
 
     private readonly record struct InteropKey(string TargetModId, Type SourceType) { public override readonly string ToString() => $"\"{TargetModId}\", {SourceType}"; }
     private record class InteropData(string SourceModId, Type SourceInterface, Type TargetInterface, DynamicWrapperFactory Factory) { public override string ToString() => $"\"{SourceModId}\", {SourceInterface.Name}, {TargetInterface}"; }
@@ -160,7 +176,7 @@ public class DynamicWrapper
 
     private static bool TryGetTypeFromModId(string modId, string typeName, string? namespaceQualitfiedName, [NotNullWhen(true)] out Type? type)
     {
-        if (loadedModAssemblies.TryGetValue(modId, out var assemblies))
+        if (LoadedModAssemblies.TryGetValue(modId, out var assemblies))
         {
             foreach (Assembly assembly in assemblies)
             {
@@ -178,7 +194,7 @@ public class DynamicWrapper
     internal static void ProcessType(Type sourceInterface)
     {
         InteropInterfaceAttribute? attr = sourceInterface.GetCustomAttribute<InteropInterfaceAttribute>();
-        if (attr == null || !loadedModAssemblies.ContainsKey(attr.TargetModId))
+        if (attr == null || !LoadedModAssemblies.ContainsKey(attr.TargetModId))
             return;
 
         DeclareInterfaceInternal(attr.TargetModId, null, attr.SourceModId, sourceInterface, attr.TargetInterfaceName);
@@ -586,6 +602,12 @@ public class DynamicWrapper
 
 
     // Here is the meat
+
+    internal static void RegisterDynamicAssembly()
+    {
+        // Unsure about this...if any caller wants to know, I think "BaseLib" is the wrong answer...
+        ModManager.AssociateAssemblyWithMod(BaseLibMain.ModId, _assemblyBuilder);
+    }
 
     private static readonly AssemblyBuilder _assemblyBuilder = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("DynamicWrappers"), AssemblyBuilderAccess.Run);
     private static readonly ModuleBuilder _moduleBuilder = _assemblyBuilder.DefineDynamicModule("DynamicWrappers");
