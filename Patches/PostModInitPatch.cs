@@ -125,6 +125,7 @@ class PostModInitPatch
                 }
             }
         }
+        DynamicWrapper.FinalizeTypeProcessing();
     }
     
     private static readonly List<IFormatter> AddLaterFormatters = [];

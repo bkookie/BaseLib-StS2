@@ -1,4 +1,5 @@
 ﻿using System.Collections;
+using MegaCrit.Sts2.Core.Hooks;
 
 namespace BaseLib.Utils.ModInterop.DynamicWrappers;
 
@@ -15,9 +16,9 @@ public static class DynamicWrapperExtensions
     extension<TReturn>(IEnumerable enumerable)
     {
         /// <summary>
-        /// Returns all elements in the sequence that are either of type <typeparamref name="TReturn"/>, or implement <see cref="IWrappable"/> and can be wrapped into a <typeparamref name="TReturn"/> for <paramref name="targetModId"/>.
+        /// Returns all elements in the sequence that are either of type <typeparamref name="TReturn"/>, or can be wrapped into a <typeparamref name="TReturn"/>.
         /// </summary>
-        /// <remarks>Intended for use with combatState?.IterateHookListeners().OfTypeDynamic&lt;T&gt;()</remarks>
+        /// <remarks>Intended for use with <see cref="Hook"/>.IterateCombatHookListeners().OfTypeDynamic&lt;TReturn&gt;()</remarks>
         /// <param name="targetModId">The modId to wrap elements for, if able. If not known, supply <see langword="null"/>, and it will seek the target mod using type <typeparamref name="TReturn"/>.</param>
         /// <returns>A new sequence filtered to elements of type <typeparamref name="TReturn"/>.</returns>
         public IEnumerable<TReturn> OfTypeDynamic(string? targetModId = null)
