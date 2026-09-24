@@ -51,24 +51,6 @@ public class DynamicWrapper
 #endif
 
     /// <summary>
-    /// A factory method to create an <see cref="IDynamicWrapper"/> for wrapping a supplied instance object.
-    /// </summary>
-    /// <param name="instance">The underlying instance object.</param>
-    /// <returns>A dynamically generated wrapper class for the supplied <paramref name="instance"/>.</returns>
-    private delegate IDynamicWrapper DynamicWrapperFactory(object instance);
-
-    /// <summary>
-    /// Defines the constructor signature for a DynamicWrapper.
-    /// </summary>
-    /// <param name="wrapperModId">The mod that the wrapper is for.</param>
-    /// <param name="instanceModId">The mod that the underlying instance object is from.</param>
-    /// <param name="instance">The underlying instance object.</param>
-    /// <param name="delegates">A collection of delegates that will be used to map the wrapper to the instance object.</param>
-    private delegate void DynamicWrapperConstructor(string wrapperModId, string instanceModId, object instance, IReadOnlyDictionary<string, Delegate> delegates);
-
-    private static InvalidOperationException SourceModNullException() => new InvalidOperationException($"{nameof(SourceModId)} not defined. Either set the {nameof(SourceModId)} property, or call the static overload and provide the name explicitly.");
-
-    /// <summary>
     /// Fired whenever a type is registered.
     /// </summary>
     public static event TypeRegisteredEventHandler? TypeRegistered;
@@ -222,23 +204,6 @@ public class DynamicWrapper
         }
     }
 
-    private static bool TryGetTypeFromModId(string modId, string typeName, string? namespaceQualifiedName, [NotNullWhen(true)] out Type? type)
-    {
-        if (LoadedModAssemblies.TryGetValue(modId, out var assemblies))
-        {
-            foreach (Assembly assembly in assemblies)
-            {
-                type = namespaceQualifiedName != null
-                    ? assembly.GetType(namespaceQualifiedName)
-                    : assembly.GetExportedTypes().FirstOrDefault(t => t.Name == typeName);
-                if (type != null)
-                    return true;
-            }
-        }
-        type = null;
-        return false;
-    }
-
     internal static void ProcessType(Type sourceInterface)
     {
         if (!sourceInterface.IsInterface)
@@ -259,6 +224,27 @@ public class DynamicWrapper
             RegisterType(targetModId, sourceModId, null, sourceInterface);
         }
         AttributeDeclarations = null!; // Never used again
+    }
+
+
+
+
+
+    private static bool TryGetTypeFromModId(string modId, string typeName, string? namespaceQualifiedName, [NotNullWhen(true)] out Type? type)
+    {
+        if (LoadedModAssemblies.TryGetValue(modId, out var assemblies))
+        {
+            foreach (Assembly assembly in assemblies)
+            {
+                type = namespaceQualifiedName != null
+                    ? assembly.GetType(namespaceQualifiedName)
+                    : assembly.GetExportedTypes().FirstOrDefault(t => t.Name == typeName);
+                if (type != null)
+                    return true;
+            }
+        }
+        type = null;
+        return false;
     }
 
 
@@ -358,11 +344,11 @@ public class DynamicWrapper
                     }
                     return false;
 
-                    static bool MatchTypes(Type checkType, Type targetType, HashSet<Type> declaredTypes)
+                    static bool MatchTypes(Type sourceType, Type targetType, HashSet<Type> declaredTypes)
                     {
                         // Note that it is not checking if declared types are actually mirrors of each other. If not mirrored, it will cause problems further down the track
                         // TODO: actually perform this check properly
-                        return checkType == targetType || checkType.IsEnum && targetType.IsEnum || declaredTypes.Contains(targetType);
+                        return sourceType == targetType || sourceType.IsEnum && targetType.IsEnum || declaredTypes.Contains(targetType);
                     }
                 });
 
@@ -667,6 +653,31 @@ public class DynamicWrapper
 
 
 
+    private static InvalidOperationException SourceModNullException() => new InvalidOperationException($"{nameof(SourceModId)} not defined. Either set the {nameof(SourceModId)} property, or call the static overload and provide the name explicitly.");
+
+    /// <summary>
+    /// A factory method to create an <see cref="IDynamicWrapper"/> for wrapping a supplied instance object.
+    /// </summary>
+    /// <param name="instance">The underlying instance object.</param>
+    /// <returns>A dynamically generated wrapper class for the supplied <paramref name="instance"/>.</returns>
+    private delegate IDynamicWrapper DynamicWrapperFactory(object instance);
+
+    /// <summary>
+    /// Defines the constructor signature for a DynamicWrapper.
+    /// </summary>
+    /// <param name="wrapperModId">The mod that the wrapper is for.</param>
+    /// <param name="instanceModId">The mod that the underlying instance object is from.</param>
+    /// <param name="instance">The underlying instance object.</param>
+    /// <param name="delegates">A collection of delegates that will be used to map the wrapper to the instance object.</param>
+    private delegate void DynamicWrapperConstructor(string wrapperModId, string instanceModId, object instance, IReadOnlyDictionary<string, Delegate> delegates);
+
+
+
+
+
+
+
+
 
 
 
@@ -678,12 +689,14 @@ public class DynamicWrapper
         ModManager.AssociateAssemblyWithMod(BaseLibMain.ModId, _assemblyBuilder);
     }
 
-    private static readonly AssemblyBuilder _assemblyBuilder = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("DynamicWrappers"), AssemblyBuilderAccess.Run);
-    private static readonly ModuleBuilder _moduleBuilder = _assemblyBuilder.DefineDynamicModule("DynamicWrappers");
+    const string AssemblyName = "DynamicWrappers";
+
+    private static readonly AssemblyBuilder _assemblyBuilder = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName(AssemblyName), AssemblyBuilderAccess.Run);
+    private static readonly ModuleBuilder _moduleBuilder = _assemblyBuilder.DefineDynamicModule(AssemblyName);
 
 #if DEBUG
-    private static readonly PersistedAssemblyBuilder _persistedAssemblyBuilder = new PersistedAssemblyBuilder(new AssemblyName("DynamicWrappers"), typeof(object).Assembly);
-    private static readonly ModuleBuilder _persistedModuleBuilder = _persistedAssemblyBuilder.DefineDynamicModule("DynamicWrappers");
+    private static readonly PersistedAssemblyBuilder _persistedAssemblyBuilder = new PersistedAssemblyBuilder(new AssemblyName(AssemblyName), typeof(object).Assembly);
+    private static readonly ModuleBuilder _persistedModuleBuilder = _persistedAssemblyBuilder.DefineDynamicModule(AssemblyName);
 #endif
 
     // WARNING: If you change the signature of either Wrap<T>(string, object?, Type?) or Wrap(string, object?, Type?), make sure the below two fields can still find them
@@ -694,9 +707,9 @@ public class DynamicWrapper
 
 
     /// <inheritdoc cref="CreateWrapperFactory(ModuleBuilder, Type, Type, IReadOnlyDictionary{string, Delegate}, string, string)"/>
-    private static DynamicWrapperFactory CreateWrapperFactory(Type wrapperInterfaceType, Type instanceInterfaceType, IReadOnlyDictionary<string, Delegate> delegates, string targetModId, string originModId)
+    private static DynamicWrapperFactory CreateWrapperFactory(Type wrapperInterface, Type instanceInterface, IReadOnlyDictionary<string, Delegate> delegates, string targetModId, string originModId)
     {
-        return CreateWrapperFactory(_moduleBuilder, wrapperInterfaceType, instanceInterfaceType, delegates, targetModId, originModId);
+        return CreateWrapperFactory(_moduleBuilder, wrapperInterface, instanceInterface, delegates, targetModId, originModId);
     }
 
     /// <summary>
@@ -710,29 +723,29 @@ public class DynamicWrapper
     /// </remarks>
     /// <param name="moduleBuilder">Which module to use. For runtime types, the module from the standard <see cref="AssemblyBuilder"/> is required.
     /// Only use the module from <see cref="PersistedAssemblyBuilder"/> for debugging, which allows saving to disk for inspection in dnSpy (and has no runtime presence).</param>
-    /// <param name="wrapperInterfaceType">The interface that this wrapper will implement.</param>
-    /// <param name="instanceInterfaceType">The mirror interface that the underlying object implements.</param>
+    /// <param name="wrapperInterface">The interface that this wrapper will implement.</param>
+    /// <param name="instanceInterface">The mirror interface that the underlying object implements.</param>
     /// <param name="delegates">The dictionary of delegates that map the wrapper's members to those of the underlying object.</param>
     /// <param name="wrapperModId">The modId that this wrapper is being used for (ie. the optional mod), regardless of the direction being wrapped.</param>
     /// <param name="instanceModId">The modId that the instance object belongs to. Only used to create a unique namespace in the assembly.</param>
     /// <returns>A <see cref="DynamicWrapperFactory"/> delegate that can be invoked to instantiate new instances of the generated dynamic type.</returns>
-    private static DynamicWrapperFactory CreateWrapperFactory(ModuleBuilder moduleBuilder, Type wrapperInterfaceType, Type instanceInterfaceType, IReadOnlyDictionary<string, Delegate> delegates, string wrapperModId, string instanceModId)
+    private static DynamicWrapperFactory CreateWrapperFactory(ModuleBuilder moduleBuilder, Type wrapperInterface, Type instanceInterface, IReadOnlyDictionary<string, Delegate> delegates, string wrapperModId, string instanceModId)
     {
-        string typeName = $"{wrapperModId}.{instanceModId}.{wrapperInterfaceType.Name[1..]}Wrapper"; // Remove the leading 'I' from the interface name. Will be awkward if it doesnt start with I
-        TypeBuilder typeBuilder = moduleBuilder.DefineType(typeName, TypeAttributes.Public | TypeAttributes.Class, typeof(object), [wrapperInterfaceType, typeof(IDynamicWrapper)]);
+        string typeName = $"{wrapperModId}.{instanceModId}.{wrapperInterface.Name[1..]}Wrapper"; // Remove the leading 'I' from the interface name. Will be awkward if it doesnt start with I
+        TypeBuilder typeBuilder = moduleBuilder.DefineType(typeName, TypeAttributes.Public | TypeAttributes.Class, typeof(object), [wrapperInterface, typeof(IDynamicWrapper)]);
 
         MethodAttributes getterSetterAttributes = MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.NewSlot | MethodAttributes.SpecialName | MethodAttributes.HideBySig;
 
         // IDynamicWrapper properties
         FieldBuilder wrapperModIdField = typeBuilder.DefineField(nameof(IDynamicWrapper.WrapperModId).AsBackingFieldCamelCase, typeof(string), FieldAttributes.Private | FieldAttributes.InitOnly);
         FieldBuilder instanceModIdField = typeBuilder.DefineField(nameof(IDynamicWrapper.InstanceModId).AsBackingFieldCamelCase, typeof(string), FieldAttributes.Private | FieldAttributes.InitOnly);
-        FieldBuilder instanceField = typeBuilder.DefineField(nameof(IDynamicWrapper.Instance).AsBackingFieldCamelCase, instanceInterfaceType, FieldAttributes.Private | FieldAttributes.InitOnly);
+        FieldBuilder instanceField = typeBuilder.DefineField(nameof(IDynamicWrapper.Instance).AsBackingFieldCamelCase, instanceInterface, FieldAttributes.Private | FieldAttributes.InitOnly);
 
         DefineIDynamicWrapperProperty(typeBuilder, typeof(IDynamicWrapper).GetProperty(nameof(IDynamicWrapper.WrapperModId))!, wrapperModIdField, getterSetterAttributes, null, null);
         DefineIDynamicWrapperProperty(typeBuilder, typeof(IDynamicWrapper).GetProperty(nameof(IDynamicWrapper.InstanceModId))!, instanceModIdField, getterSetterAttributes, null, null);
-        DefineIDynamicWrapperProperty(typeBuilder, typeof(IDynamicWrapper).GetProperty(nameof(IDynamicWrapper.Instance))!, instanceField, getterSetterAttributes, castGetTo: typeof(object), castSetTo: instanceInterfaceType);
-        DefineIDynamicWrapperProperty_InterfaceType(typeBuilder, typeof(IDynamicWrapper).GetProperty(nameof(IDynamicWrapper.WrapperInterface))!, wrapperInterfaceType, getterSetterAttributes); // readonly, no backing field
-        DefineIDynamicWrapperProperty_InterfaceType(typeBuilder, typeof(IDynamicWrapper).GetProperty(nameof(IDynamicWrapper.InstanceInterface))!, instanceInterfaceType, getterSetterAttributes);
+        DefineIDynamicWrapperProperty(typeBuilder, typeof(IDynamicWrapper).GetProperty(nameof(IDynamicWrapper.Instance))!, instanceField, getterSetterAttributes, castGetTo: typeof(object), castSetTo: instanceInterface);
+        DefineIDynamicWrapperProperty_InterfaceType(typeBuilder, typeof(IDynamicWrapper).GetProperty(nameof(IDynamicWrapper.WrapperInterface))!, wrapperInterface, getterSetterAttributes); // readonly, no backing field
+        DefineIDynamicWrapperProperty_InterfaceType(typeBuilder, typeof(IDynamicWrapper).GetProperty(nameof(IDynamicWrapper.InstanceInterface))!, instanceInterface, getterSetterAttributes);
 
         static void DefineIDynamicWrapperProperty(TypeBuilder typeBuilder, PropertyInfo propInfo, FieldBuilder backingField, MethodAttributes attr, Type? castGetTo, Type? castSetTo)
         {
@@ -792,8 +805,8 @@ public class DynamicWrapper
         Dictionary<string, FieldInfo> delegateFields = [];
 
         // Get all properties and methods from the wrapperInterfaceType (methods exclude property getter and setters)
-        IEnumerable<PropertyInfo> interfaceProps = wrapperInterfaceType.GetProperties();
-        IEnumerable<MethodInfo> interfaceMethods = wrapperInterfaceType.GetMethods().Except(interfaceProps.SelectMany(prop => ((IEnumerable<MethodInfo>)[prop.GetMethod!, prop.SetMethod!]).Where(mInfo => mInfo != null)));
+        IEnumerable<PropertyInfo> interfaceProps = wrapperInterface.GetProperties();
+        IEnumerable<MethodInfo> interfaceMethods = wrapperInterface.GetMethods().Except(interfaceProps.SelectMany(prop => ((IEnumerable<MethodInfo>)[prop.GetMethod!, prop.SetMethod!]).Where(mInfo => mInfo != null)));
 
         foreach (PropertyInfo propInfo in interfaceProps)
         {
@@ -952,7 +965,7 @@ public class DynamicWrapper
             il.Emit(OpCodes.Stfld, instanceModIdField);
             il.Emit(OpCodes.Ldarg_0);
             il.Emit(OpCodes.Ldarg_3);
-            il.Emit(OpCodes.Castclass, instanceInterfaceType);
+            il.Emit(OpCodes.Castclass, instanceInterface);
             il.Emit(OpCodes.Stfld, instanceField);
 
             // Init all delegate fields. Delegates from the dictionary should map 1:1 with the fields
@@ -974,8 +987,11 @@ public class DynamicWrapper
 #if DEBUG
         if (moduleBuilder != _persistedModuleBuilder) // dont stuck in loop
         {
-            // Run this through the persisted builder so we can save and inspect it in dnSpy if needed.
-            CreateWrapperFactory(_persistedModuleBuilder, wrapperInterfaceType, instanceInterfaceType, delegates, wrapperModId, instanceModId);
+            if (!_assemblySaved)
+            {
+                // Run this through the persisted builder so we can save and inspect it in dnSpy if needed.
+                CreateWrapperFactory(_persistedModuleBuilder, wrapperInterface, instanceInterface, delegates, wrapperModId, instanceModId);
+            }
         }
         else
         {
@@ -986,17 +1002,24 @@ public class DynamicWrapper
         return (instance) => (IDynamicWrapper)Activator.CreateInstance(createdType, wrapperModId, instanceModId, instance, delegates)!;
     }
 
+    private static bool _assemblySaved = false;
+
     /// <summary>
-    /// Saves the generated assembly to disk. Call this to inspect the generated types with dnSpy.
+    /// Saves the generated assembly to disk. Call this to inspect the generated types with dnSpy. Can only be saved once.
     /// </summary>
     /// <remarks>Requires debug build. In a release build, perform the following to inspect instead: dnSpy -> Debug Menu -> Attach to Process -> SlayTheSpire2.exe -> break/pause -> Debug Menu -> Windows -> Modules -> DynamicWrappers</remarks>
     /// <param name="filename">The file name to save to. Root directory is StS executable folder.</param>
-    /// <returns><see langword="false"/> if BaseLib is not running a debug build (and no file is generated).</returns>
+    /// <returns><see langword="false"/> if BaseLib is not running a debug build (and no file is generated), or if the assembly has already been saved.</returns>
     internal static bool SaveAssembly(string filename)
     {
         // I dont think this belongs on the public API, but can call this via reflection from another mod if needed
 #if DEBUG
+        if (_assemblySaved)
+            return false;
+
         _persistedAssemblyBuilder.Save(filename);
+        _assemblySaved = true;
+        BaseLibMain.Logger.Warn($"[DynamicWrappers] Saving persisted assembly to file; no further types can be created here (does not affect the runtime assembly)");
         return true;
 #else
         // TODO: generate the persisted assembly on demand

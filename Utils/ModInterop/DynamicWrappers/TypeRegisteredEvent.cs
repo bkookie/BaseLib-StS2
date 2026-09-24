@@ -1,7 +1,7 @@
 ﻿namespace BaseLib.Utils.ModInterop.DynamicWrappers;
 
 /// <summary>
-/// EventHandler for the TypeRegistered event.
+/// EventHandler for the <see cref="DynamicWrapper.TypeRegistered"/> event.
 /// </summary>
 /// <param name="e">An object providing data related to the event.</param>
 public delegate void TypeRegisteredEventHandler(TypeRegisteredEventArgs e);
