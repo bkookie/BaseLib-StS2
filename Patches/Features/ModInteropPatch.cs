@@ -133,7 +133,7 @@ internal class ModInterop
         }
         catch (Exception e)
         {
-            BaseLibMain.Logger.Info(e.ToString());
+            BaseLibMain.Logger.Error(e.ToString());
             return false;
         }
     }
@@ -228,7 +228,7 @@ internal class ModInterop
         }
         catch (Exception e)
         {
-            BaseLibMain.Logger.Info(e.ToString());
+            BaseLibMain.Logger.Error(e.ToString());
             return false;
         }
 
@@ -370,7 +370,7 @@ internal class ModInterop
         }
         catch (Exception e)
         {
-            BaseLibMain.Logger.Info(e.ToString());
+            BaseLibMain.Logger.Error(e.ToString());
             return false;
         }
     }
