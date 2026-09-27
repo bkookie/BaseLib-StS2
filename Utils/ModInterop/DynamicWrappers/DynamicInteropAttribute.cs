@@ -22,7 +22,7 @@ public sealed class DynamicInteropAttribute(string targetModId, string sourceMod
     public string SourceModId { get; } = sourceModId;
 
     /// <summary>
-    /// The namespace qualified name of the type in TargetModId. If <see langword="null"/>, will search for the attached interface name. The type name must still match exactly.
+    /// The namespace qualified name of the type in TargetModId. Required if the target has a different name to your own. If <see langword="null"/>, will search for the attached interface name.
     /// </summary>
     public string? TargetInterfaceFullName { get; set; } = null;
 }

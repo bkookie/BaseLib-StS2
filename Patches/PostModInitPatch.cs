@@ -75,7 +75,6 @@ class PostModInitPatch
         foreach (var type in ReflectionHelper.ModTypes)
         {
             interop.ProcessType(harmony, type);
-            DynamicWrapper.ProcessType(type);
 
             if (type.IsAbstract || type.IsInterface) continue;
             
@@ -125,7 +124,6 @@ class PostModInitPatch
                 }
             }
         }
-        DynamicWrapper.FinalizeTypeProcessing();
     }
     
     private static readonly List<IFormatter> AddLaterFormatters = [];
@@ -193,8 +191,11 @@ class PostModInitPatch
                 BetaMainCompatibility.CacheSavedProperties(type);
                 //SavedPropertiesTypeCache.InjectTypeIntoCache(type);
             }
+
+            DynamicWrapper.ProcessType(type);
         }
         SavedSpireFieldPatch.AddFieldsSorted();
+        DynamicWrapper.FinalizeTypeProcessing(); // Anytime after AssemblyInfo.Init()
     }
 
     private static void CheckSpecialSpireField(FieldInfo field)
