@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Modding;
 
@@ -25,7 +26,7 @@ public class DynamicWrapper
             {
                 // Could wait until AssemblyInfo.Init() instead, consistent with TryGetModIdFromType(), to give time for multi-assembly mods to register all their assemblies.
                 if (ModManager.State != ModManagerState.Initialized)
-                    throw new InvalidOperationException($"{nameof(ModManager)} has not initialized yet (current state is '{ModManager.State}'). Please wait until all mods have been loaded.");
+                    throw new InvalidOperationException(ErrorMsg($"{nameof(ModManager)} has not initialized yet (current state is '{ModManager.State}'). Please wait until all mods have been loaded."));
 
                 field = ModManager.GetLoadedMods().Where(mod => mod.manifest?.id != null).ToDictionary(mod => mod.manifest!.id!, mod => mod.assemblies);
             }
@@ -200,7 +201,7 @@ public class DynamicWrapper
         }
         else
         {
-            throw new InvalidOperationException($"Interface '{targetInterfaceFullName ?? sourceInterface.Name}' from '{targetModId}' could not be found");
+            throw new InvalidOperationException(ErrorMsg($"Interface '{targetInterfaceFullName ?? sourceInterface.Name}' from '{targetModId}' could not be found"));
         }
     }
 
@@ -254,7 +255,7 @@ public class DynamicWrapper
     static bool TryGetModIdFromType(Type type, [NotNullWhen(true)] out string? modId)
     {
         if (AssemblyInfo.ModMap == null)
-            throw new InvalidOperationException($"'{nameof(AssemblyInfo)}' has not been initialized yet");
+            throw new InvalidOperationException(ErrorMsg($"'{nameof(AssemblyInfo)}' has not been initialized yet"));
 
         modId = AssemblyInfo.ModForType(type, out _)?.manifest?.id;
         return modId != null;
@@ -299,10 +300,15 @@ public class DynamicWrapper
     {
         if (!sourceInterface.IsInterface)
         {
-            throw new ArgumentException($"The provided argument '{nameof(sourceInterface)}' of type '{sourceInterface.GetType()}' is not an interface. DynamicWrappers require an interface.", nameof(sourceInterface));
+            throw new ArgumentException(ErrorMsg($"The provided argument '{nameof(sourceInterface)}' of type '{sourceInterface.GetType()}' is not an interface. DynamicWrappers require an interface."), nameof(sourceInterface));
         }
 
-        BaseLibMain.Logger.VeryDebug($"[DynamicWrappers] Registering: targetModId='{targetModId}', sourceModId='{sourceModId}', sourceType='{sourceType?.Name ?? ""}', interface='{sourceInterface.Name}', regType='{regType}'");
+        string log = $"[DynamicWrappers] Registering: targetModId='{targetModId}', sourceModId='{sourceModId}', sourceType='{sourceType?.Name ?? ""}', sourceInterface='{sourceInterface.Name}', regType='{regType}', result: ";
+
+        static void LogResult(string log, string result)
+        {
+            BaseLibMain.Logger.VeryDebug($"{log}{result}");
+        }
 
         if (targetInterface != null || MirroredInterfaces.TryGetValue(new(targetModId, sourceModId, sourceInterface), out targetInterface) || TryGetTypeFromModId(targetModId, sourceInterface.Name, null, out targetInterface))
         {
@@ -310,7 +316,7 @@ public class DynamicWrapper
             if (InteropLookup.TryGetValue(new(targetInterface, sourceInterface), out data))
             {
                 if (data == null)
-                    throw new InvalidOperationException($"Internal logic error: Trying to register '{sourceInterface}' with '{targetModId}', but it has already been marked as not wrappable.");
+                    throw new InvalidOperationException(ErrorMsg($"Internal logic error: Trying to register '{sourceInterface}' with '{targetModId}', but it has already been marked as not wrappable."));
 
                 InteropKey interopKey;
                 if (sourceType != null && sourceType != sourceInterface && !InteropLookup.ContainsKey(interopKey = new(targetInterface, sourceType)))
@@ -318,10 +324,11 @@ public class DynamicWrapper
                     // Already generated for this sourceInterface, we can reuse the data for this concrete type
                     // Nothing to add to reverse lookups; they only require the interface, not concrete types, and it too will have already been generated
                     RegisterClassWithInterface(targetModId, targetInterface, sourceModId, sourceType, sourceInterface, data);
+                    LogResult(log, "Success");
                 }
                 else
                 {
-                    BaseLibMain.Logger.VeryDebug($"[DynamicWrappers] The type '{sourceType}' has already been registered with '{targetModId}' and interface '{sourceInterface.Name}'");
+                    LogResult(log, "Already Registered");
                 }
                 return true;
             }
@@ -330,13 +337,11 @@ public class DynamicWrapper
                 // Register the interface first, then the concrete type can copy that data
                 if (!RegisterType(targetModId, targetInterface, sourceModId, null, sourceInterface, regType, null, out data) || data == null)
                 {
-                    if (regType != RegistrationType.Dependency && regType != RegistrationType.Auto)
-                    {
-                        BaseLibMain.Logger.Warn($"[DynamicWrappers] Registration of {sourceType} failed silently while {nameof(regType)} = {regType}");
-                    }
+                    LogResult(log, "Failed");
                     return false; // Should only hit this code during auto-registration or a pure validation check, so is safe to return false again here
                 }
                 RegisterClassWithInterface(targetModId, targetInterface, sourceModId, sourceType, sourceInterface, data);
+                LogResult(log, "Success");
                 return true;
             }
 
@@ -404,11 +409,13 @@ public class DynamicWrapper
                 }
                 else
                 {
-                    if (regType == RegistrationType.Dependency)
+                    if (regType == RegistrationType.Explicit)
                     {
-                        sourceInterface = currentlyRegistering.GetAt(0).Value.SourceType;
+                        throw new ArgumentException(ErrorMsg($"The type '{sourceType ?? sourceInterface}' does not implement the required interface members (missing/incorrect signature of '{targetInterface}.{targetMethod.Name}')."));
                     }
-                    throw new ArgumentException($"The type '{sourceType ?? sourceInterface}' does not implement the required interface members (missing/incorrect signature of '{targetInterface}.{targetMethod.Name}').");
+
+                    LogResult(log, "Failed Validation");
+                    return false;
                 }
             }
 
@@ -417,6 +424,7 @@ public class DynamicWrapper
             if (regType == RegistrationType.Dependency)
             {
                 // Wait for all dependencies to resolve before registering anything. Data is stored in 'currentlyRegistering'.
+                LogResult(log, "Success");
                 return true;
             }
 
@@ -491,19 +499,20 @@ public class DynamicWrapper
             }
 
             if (data == null)
-                throw new InvalidOperationException($"Internal logic error: '{nameof(data)}' should not be null");
+                throw new InvalidOperationException(ErrorMsg($"Internal logic error: '{nameof(data)}' should not be null"));
 
+            LogResult(log, "Success");
             return true;
         }
         else if (regType != RegistrationType.Explicit)
         {
-            BaseLibMain.Logger.Debug($"[DynamicWrappers] Could not auto-register interface '{sourceInterface}' with '{targetModId}'");
+            LogResult(log, "Failed");
             data = null;
             return false;
         }
         else
         {
-            throw new InvalidOperationException($"The interface '{sourceInterface.Name}' could not be found in '{targetModId}'.");
+            throw new InvalidOperationException(ErrorMsg($"The interface '{sourceInterface.Name}' could not be found in '{targetModId}'."));
         }
     }
 
@@ -581,11 +590,6 @@ public class DynamicWrapper
         }
         else if (objectToWrap is IDynamicWrapper wrapper)
         {
-            if (sourceInterface != null && sourceInterface != wrapper.WrapperInterface)
-            {
-                BaseLibMain.Logger.Warn($"[DynamicWrappers] Mismatch between expected and actual interface type while wrapping '{wrapper.GetType()}': expected {nameof(sourceInterface)}='{sourceInterface}', actual {nameof(wrapper.WrapperInterface)}='{wrapper.WrapperInterface}'");
-            }
-
             if (wrapper.WrapperModId == targetModId)
             {
                 return wrapper;
@@ -619,9 +623,9 @@ public class DynamicWrapper
             return null!; // internal use only (TryWrap)
 
         if (targetModId == null)
-            throw new InvalidOperationException($"The type '{objectToWrap.GetType()}' has not been registered with interface {targetInterface?.FullName ?? "<NotProvided>"}.");
+            throw new InvalidOperationException(ErrorMsg($"The type '{objectToWrap.GetType()}' has not been registered with interface {targetInterface?.FullName ?? "<NotProvided>"}."));
 
-        throw new InvalidOperationException($"Unable to wrap '{objectToWrap.GetType()}' for target mod '{targetModId}'{(targetInterface == null ? "" : $" with target interface '{targetInterface}'")}.");
+        throw new InvalidOperationException(ErrorMsg($"Unable to wrap '{objectToWrap.GetType()}' for target mod '{targetModId}'{(targetInterface == null ? "" : $" with target interface '{targetInterface}'")}."));
 
 
 
@@ -646,7 +650,7 @@ public class DynamicWrapper
                     return false;
                 }
 
-                throw new InvalidOperationException($"Could not find the mod that the target interface '{targetInterface}' belongs to.");
+                throw new InvalidOperationException(ErrorMsg($"Could not find the mod that the target interface '{targetInterface}' belongs to."));
             }
             else if (targetModId != null)
             {
@@ -661,7 +665,7 @@ public class DynamicWrapper
                 return false;
             }
 
-            throw new InvalidOperationException($"No {nameof(targetModId)} or {nameof(targetInterface)} supplied. At least one of these is required in order to wrap an object.");
+            throw new InvalidOperationException(ErrorMsg($"No {nameof(targetModId)} or {nameof(targetInterface)} supplied. At least one of these is required in order to wrap an object."));
 
 
 
@@ -710,14 +714,14 @@ public class DynamicWrapper
                 else if (numWrappableInterfaces == 1)
                 {
                     if (interopData == null)
-                        throw new InvalidOperationException($"Internal logic error: '{nameof(interopData)}' is null, even though a wrappable interface was found.");
+                        throw new InvalidOperationException(ErrorMsg($"Internal logic error: '{nameof(interopData)}' is null, even though a wrappable interface was found."));
 
                     AltLookup[new(targetModId, sourceType)] = interopData; // Registration does not automatically add concrete types to this lookup. Can only do this when the type implements only a single wrappable interface.
                 }
                 else if (targetInterface == null && sourceInterface == null)
                 {
                     if (!returnNullIfNotWrapped)
-                        throw new AmbiguousMatchException($"'{sourceType}' implements multiple interfaces for mod '{targetModId}'. Please specify an interface explicitly.");
+                        throw new AmbiguousMatchException(ErrorMsg($"'{sourceType}' implements multiple interfaces for mod '{targetModId}'. Please specify an interface explicitly."));
 
                     AltLookup[new(targetModId, sourceType)] = null; // Can still be wrapped by specifying one of it's interfaces
                     data = null;
@@ -765,7 +769,7 @@ public class DynamicWrapper
     /// <para/>Note that if both <paramref name="targetInterface"/> and <paramref name="sourceInterface"/> are <see langword="null"/>, 
     /// the correct wrapper needs to be inferred and may produce errors, depending on <paramref name="objectToWrap"/>'s implemented interfaces.</param>
     /// <param name="objectToWrap">The object to wrap.</param>
-    /// <param name="sourceInterface">The source interface to wrap by. Only required when the target interface is unknown and <paramref name="objectToWrap"/> implements multiple wrappable interfaces.</param>
+    /// <param name="sourceInterface">The source interface to wrap by. Only required when the target interface is unknown or <paramref name="objectToWrap"/> implements multiple wrappable interfaces.</param>
     /// <param name="wrapper">If the method returned <see langword="true"/>, then this is either an <see cref="IDynamicWrapper"/> implenting an interface that <paramref name="targetModId"/> can consume, or the object instance itself if it is native to <paramref name="targetModId"/>.</param>
     /// <returns><see langword="true"/> if the object was successfully wrapped (or wrapping wasn't required), otherwise <see langword="false"/>. Returns <see langword="false"/> if <paramref name="objectToWrap"/> is <see langword="null"/>.</returns>
     public static bool TryWrap(string targetModId, Type? targetInterface, object? objectToWrap, Type? sourceInterface, [NotNullWhen(true)] out object? wrapper)
@@ -793,7 +797,7 @@ public class DynamicWrapper
 
 
 
-    private static InvalidOperationException SourceModNullException() => new InvalidOperationException($"{nameof(SourceModId)} not defined. Either set the {nameof(SourceModId)} property, or call the static overload and provide the name explicitly.");
+    private static InvalidOperationException SourceModNullException([CallerLineNumber] int line = 0) => new InvalidOperationException(ErrorMsg($"{nameof(SourceModId)} not defined. Either set the {nameof(SourceModId)} property, or call the static overload and provide the name explicitly.", line));
 
     /// <summary>
     /// A factory method to create an <see cref="IDynamicWrapper"/> for wrapping a supplied instance object.
@@ -1159,12 +1163,18 @@ public class DynamicWrapper
 
         _persistedAssemblyBuilder.Save(filename);
         _assemblySaved = true;
-        BaseLibMain.Logger.Warn($"[DynamicWrappers] Saving persisted assembly to file; no further types can be created here (does not affect the runtime assembly)");
+        BaseLibMain.Logger.Warn($"[DynamicWrappers] Saving persisted assembly to file; no further types can be created in this assembly (does not affect the runtime assembly)");
         return true;
 #else
         // TODO: generate the persisted assembly on demand
+        BaseLibMain.Logger.Warn($"[DynamicWrappers] Cannot save persisted assembly as it has not been generated (running release build)");
         return false;
 #endif
+    }
+
+    private static string ErrorMsg(string message, [CallerLineNumber] int line = 0)
+    {
+        return $"<DynamicWrapper.cs Line:{line}> {message}";
     }
 }
 
