@@ -1,10 +1,8 @@
-﻿using System.Collections.ObjectModel;
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
-using HarmonyLib;
 using MegaCrit.Sts2.Core.Modding;
 
 namespace BaseLib.Utils.ModInterop.DynamicWrappers;
@@ -40,7 +38,7 @@ public class DynamicWrapper
 
     private readonly record struct Declaration(string TargetModId, string SourceModId, Type SourceInterface) { public override readonly string ToString() => $"Target = \"{TargetModId}\", Source = \"{SourceModId}\", {SourceInterface.Name}"; }
     private readonly record struct RegistrationKey(Type TargetInterface, Type SourceInterface) { public override readonly string ToString() => $"\"{SourceInterface.Name}\", Target = {TargetInterface}, Source = {SourceInterface}"; }
-    private readonly record struct RegistrationData(Type SourceType, ReadOnlyDictionary<string, Delegate> Delegates, ReadOnlyDictionary<string, Delegate> ReverseDelegates) { public override readonly string ToString() => $"SourceType = \"{SourceType}\", Delegates = {Delegates?.Count.ToString() ?? "null"}"; }
+    private readonly record struct RegistrationData(Type SourceType, Dictionary<string, MethodInfo> TargetMethods, Dictionary<string, MethodInfo> SourceMethods) { public override readonly string ToString() => $"SourceType = \"{SourceType}\", Delegates = {TargetMethods?.Count.ToString() ?? "null"}"; }
 
     private static readonly HashSet<Declaration> AttributeDeclarations = [];
     private static readonly HashSet<Declaration> InterfaceDeclarations = [];
@@ -345,19 +343,18 @@ public class DynamicWrapper
                 return true;
             }
 
-            Dictionary<string, Delegate> delegates = [];
-            Dictionary<string, Delegate> reverseDelegates = [];
+            Dictionary<string, MethodInfo> targetMethods = [];
+            Dictionary<string, MethodInfo> sourceMethods = [];
 
             RegistrationKey regKey = new(targetInterface, sourceInterface);
             currentlyRegistering ??= [];
             currentlyRegistering.Add(regKey, new(sourceInterface, null!, null!));
 
             // Generate the delegates that will map wrappers to their object instance
-            // Could do this without delegates (they are from the original implementation), but I dont think it is worth rewriting
             foreach (MethodInfo targetMethod in targetInterface.GetMethods())
             {
                 Type[] targetParamTypes = [.. targetMethod.GetParameters().Select(pInfo => pInfo.ParameterType)];
-                Type[] sourceParamTypes = null!;
+                Type[] sourceParamTypes;
                 MethodInfo? sourceMethod = sourceInterface.GetMethods().FirstOrDefault(method =>
                 {
                     // Check for matching return and param types (or that are mirrored interfaces, which will get wrapped accordingly in the emitted IL)
@@ -399,13 +396,8 @@ public class DynamicWrapper
 
                 if (sourceMethod != null)
                 {
-                    Type delegateType = Expression.GetDelegateType([sourceInterface, .. sourceParamTypes, sourceMethod.ReturnType]); // Func<TParam1, ..., TReturn> -or- Func<TInstance, TParam1, ..., TReturn> if using an open (static) delegate (pass null for the target to Delegate.CreateDelegate(). Is an Action<> for void methods.
-                    Delegate del = Delegate.CreateDelegate(delegateType, null, sourceMethod); // can load directly into fields of type Func<,>
-                    delegates.Add(sourceMethod.Name, del);
-
-                    Type reverseDelegateType = Expression.GetDelegateType([targetInterface, .. targetParamTypes, targetMethod.ReturnType]);
-                    del = Delegate.CreateDelegate(reverseDelegateType, null, targetMethod);
-                    reverseDelegates.Add(targetMethod.Name, del);
+                    sourceMethods.Add(sourceMethod.Name, sourceMethod);
+                    targetMethods.Add(targetMethod.Name, targetMethod);
                 }
                 else
                 {
@@ -419,7 +411,7 @@ public class DynamicWrapper
                 }
             }
 
-            currentlyRegistering[regKey] = new(sourceInterface, delegates.AsReadOnly(), reverseDelegates.AsReadOnly());
+            currentlyRegistering[regKey] = new(sourceInterface, targetMethods, sourceMethods);
 
             if (regType == RegistrationType.Dependency)
             {
@@ -439,12 +431,12 @@ public class DynamicWrapper
             {
                 var reg = currentlyRegistering.GetAt(i);
                 (targetInterface, sourceInterface) = reg.Key;
-                var (_, _delegates, _reverseDelegates) = reg.Value;
+                (_, targetMethods, sourceMethods) = reg.Value;
 
                 // While its possible to define compile-time wrappers using dynamic objects, you can only do this for your own side, and I think it only makes sense if both parties do this.
                 // Adds a bunch of complexity, and doesnt gain a whole lot (functionally identically, and you'll suffer the DLR kicking in on first use), so not giving the option.
-                DynamicWrapperFactory wrapperFactory = CreateWrapperFactory(targetInterface, sourceInterface, _delegates, targetModId, sourceModId);
-                DynamicWrapperFactory reverseFactory = CreateWrapperFactory(sourceInterface, targetInterface, _reverseDelegates, sourceModId, targetModId);
+                DynamicWrapperFactory wrapperFactory = CreateWrapperFactory(targetInterface, sourceInterface, sourceMethods, targetModId, sourceModId);
+                DynamicWrapperFactory reverseFactory = CreateWrapperFactory(sourceInterface, targetInterface, targetMethods, sourceModId, targetModId);
 
                 InteropData interopData = new(sourceModId, sourceInterface, targetInterface, wrapperFactory);
                 InteropData reverseData = new(targetModId, targetInterface, sourceInterface, reverseFactory);
@@ -806,16 +798,6 @@ public class DynamicWrapper
     /// <returns>A dynamically generated wrapper class for the supplied <paramref name="instance"/>.</returns>
     private delegate IDynamicWrapper DynamicWrapperFactory(object instance);
 
-    /// <summary>
-    /// Defines the constructor signature for a DynamicWrapper.
-    /// </summary>
-    /// <param name="wrapperModId">The mod that the wrapper is for.</param>
-    /// <param name="instanceModId">The mod that the underlying instance object is from.</param>
-    /// <param name="instance">The underlying instance object.</param>
-    /// <param name="delegates">A collection of delegates that will be used to map the wrapper to the instance object.</param>
-    private delegate void DynamicWrapperConstructor(string wrapperModId, string instanceModId, object instance, IReadOnlyDictionary<string, Delegate> delegates);
-
-
 
 
 
@@ -850,10 +832,10 @@ public class DynamicWrapper
     private static readonly MethodInfo getTypeFromHandle = ((Func<RuntimeTypeHandle, Type?>)Type.GetTypeFromHandle).Method;
 
 
-    /// <inheritdoc cref="CreateWrapperFactory(ModuleBuilder, Type, Type, IReadOnlyDictionary{string, Delegate}, string, string)"/>
-    private static DynamicWrapperFactory CreateWrapperFactory(Type wrapperInterface, Type instanceInterface, IReadOnlyDictionary<string, Delegate> delegates, string targetModId, string originModId)
+    /// <inheritdoc cref="CreateWrapperFactory(ModuleBuilder, Type, Type, Dictionary{string, MethodInfo}, string, string)"/>
+    private static DynamicWrapperFactory CreateWrapperFactory(Type wrapperInterface, Type instanceInterface, Dictionary<string, MethodInfo> instanceMethods, string targetModId, string originModId)
     {
-        return CreateWrapperFactory(_moduleBuilder, wrapperInterface, instanceInterface, delegates, targetModId, originModId);
+        return CreateWrapperFactory(_moduleBuilder, wrapperInterface, instanceInterface, instanceMethods, targetModId, originModId);
     }
 
     /// <summary>
@@ -869,11 +851,11 @@ public class DynamicWrapper
     /// Only use the module from <see cref="PersistedAssemblyBuilder"/> for debugging, which allows saving to disk for inspection in dnSpy (and has no runtime presence).</param>
     /// <param name="wrapperInterface">The interface that this wrapper will implement.</param>
     /// <param name="instanceInterface">The mirror interface that the underlying object implements.</param>
-    /// <param name="delegates">The dictionary of delegates that map the wrapper's members to those of the underlying object.</param>
+    /// <param name="instanceMethods">The methods defined by the underlying object.</param>
     /// <param name="wrapperModId">The modId that this wrapper is being used for (ie. the optional mod), regardless of the direction being wrapped.</param>
     /// <param name="instanceModId">The modId that the instance object belongs to. Only used to create a unique namespace in the assembly.</param>
     /// <returns>A <see cref="DynamicWrapperFactory"/> delegate that can be invoked to instantiate new instances of the generated dynamic type.</returns>
-    private static DynamicWrapperFactory CreateWrapperFactory(ModuleBuilder moduleBuilder, Type wrapperInterface, Type instanceInterface, IReadOnlyDictionary<string, Delegate> delegates, string wrapperModId, string instanceModId)
+    private static DynamicWrapperFactory CreateWrapperFactory(ModuleBuilder moduleBuilder, Type wrapperInterface, Type instanceInterface, Dictionary<string, MethodInfo> instanceMethods, string wrapperModId, string instanceModId)
     {
         string typeName = $"{wrapperModId}.{instanceModId}.{wrapperInterface.Name[1..]}Wrapper"; // Remove the leading 'I' from the interface name. Will be awkward if it doesnt start with I
         TypeBuilder typeBuilder = moduleBuilder.DefineType(typeName, TypeAttributes.Public | TypeAttributes.Class, typeof(object), [wrapperInterface, typeof(IDynamicWrapper)]);
@@ -943,11 +925,6 @@ public class DynamicWrapper
             return ModIdsByRegisteredInterface.TryGetValue(type, out string? modId) && modId == wrapperModId;
         }
 
-        // Dont actually need to use the delegates here, since we already know the types of the wrapper and the underlying object, could just perform a direct pass through instead.
-        // But they are more flexible (if the implementation should change), and using them doesnt hurt.
-        // They are required though for writing compile-time wrappers, and since we have them, might as well use them. I also dont want to re-write the code.
-        Dictionary<string, FieldInfo> delegateFields = [];
-
         // Get all properties and methods from the wrapperInterfaceType (methods exclude property getter and setters)
         IEnumerable<PropertyInfo> interfaceProps = wrapperInterface.GetProperties();
         IEnumerable<MethodInfo> interfaceMethods = wrapperInterface.GetMethods().Except(interfaceProps.SelectMany(prop => ((IEnumerable<MethodInfo>)[prop.GetMethod!, prop.SetMethod!]).Where(mInfo => mInfo != null)));
@@ -961,14 +938,8 @@ public class DynamicWrapper
                 MethodBuilder propGetter = typeBuilder.DefineMethod(propInfo.GetMethod.Name, getterSetterAttributes, CallingConventions.HasThis, propInfo.PropertyType, Type.EmptyTypes);
                 propBuilder.SetGetMethod(propGetter);
 
-                string propName = propGetter.Name;
-                Delegate del = delegates[propName];
-                FieldBuilder delField = typeBuilder.DefineField(propName.AsBackingField, del.GetType(), FieldAttributes.Private | FieldAttributes.InitOnly);
-                MethodInfo invoke = del.GetType().GetMethod("Invoke")!;
-                delegateFields.Add(propName, delField);
-
                 bool wrapReturn = RequireWrapping(propInfo.PropertyType, wrapperModId);
-                MethodInfo? wrap = null;
+                MethodInfo wrap = null!;
 
                 ILGenerator il = propGetter.GetILGenerator();
                 if (wrapReturn)
@@ -978,16 +949,14 @@ public class DynamicWrapper
                     il.Emit(OpCodes.Ldfld, wrapperModIdField); // targetModId
                 }
                 il.Emit(OpCodes.Ldarg_0);
-                il.Emit(OpCodes.Ldfld, delField);
-                il.Emit(OpCodes.Ldarg_0);
                 il.Emit(OpCodes.Ldfld, instanceField);
 
-                il.Emit(OpCodes.Callvirt, invoke);
+                il.Emit(OpCodes.Callvirt, instanceMethods[propGetter.Name]);
                 if (wrapReturn)
                 {
                     il.Emit(OpCodes.Castclass, typeof(object)); // objectToWrap
                     il.Emit(OpCodes.Ldnull); // sourceInterface
-                    il.Emit(OpCodes.Call, wrap!); // public static T? Wrap<T>(string targetModId, object? objectToWrap, Type? sourceInterface = null)
+                    il.Emit(OpCodes.Call, wrap); // public static T? Wrap<T>(string targetModId, object? objectToWrap, Type? sourceInterface = null)
                 }
                 il.Emit(OpCodes.Ret);
             }
@@ -997,15 +966,7 @@ public class DynamicWrapper
                 propBuilder.SetSetMethod(propSetter);
                 propSetter.DefineParameter(1, ParameterAttributes.None, "value");
 
-                string propName = propSetter.Name;
-                Delegate del = delegates[propName];
-                FieldBuilder delField = typeBuilder.DefineField(propName.AsBackingField, del.GetType(), FieldAttributes.Private | FieldAttributes.InitOnly);
-                MethodInfo invoke = del.GetType().GetMethod("Invoke")!;
-                delegateFields.Add(propName, delField);
-
                 ILGenerator il = propSetter.GetILGenerator();
-                il.Emit(OpCodes.Ldarg_0);
-                il.Emit(OpCodes.Ldfld, delField);
                 il.Emit(OpCodes.Ldarg_0);
                 il.Emit(OpCodes.Ldfld, instanceField);
 
@@ -1023,24 +984,19 @@ public class DynamicWrapper
                     il.Emit(OpCodes.Ldarg_1);
                 }
 
-                il.Emit(OpCodes.Callvirt, invoke);
+                il.Emit(OpCodes.Callvirt, instanceMethods[propSetter.Name]);
                 il.Emit(OpCodes.Ret);
             }
         }
 
         foreach (MethodInfo method in interfaceMethods)
         {
-            Delegate del = delegates[method.Name];
-            FieldBuilder delField = typeBuilder.DefineField(method.Name.AsBackingField, del.GetType(), FieldAttributes.Private | FieldAttributes.InitOnly);
-            MethodInfo invoke = del.GetType().GetMethod("Invoke")!;
-            delegateFields.Add(method.Name, delField);
-
             ParameterInfo[] paramInfos = method.GetParameters();
             Type[]? paramTypes = [.. paramInfos.Select(p => p.ParameterType)];
             MethodBuilder methodBuilder = typeBuilder.DefineMethod(method.Name, MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.NewSlot, CallingConventions.HasThis, method.ReturnType, paramTypes);
 
             bool wrapReturn = method.ReturnType != typeof(void) && RequireWrapping(method.ReturnType, wrapperModId);
-            MethodInfo? wrap = null;
+            MethodInfo wrap = null!;
 
             ILGenerator il = methodBuilder.GetILGenerator();
             if (wrapReturn)
@@ -1050,8 +1006,6 @@ public class DynamicWrapper
                 il.Emit(OpCodes.Ldarg_0);
                 il.Emit(OpCodes.Ldfld, wrapperModIdField); // targetModId
             }
-            il.Emit(OpCodes.Ldarg_0);
-            il.Emit(OpCodes.Ldfld, delField);
             il.Emit(OpCodes.Ldarg_0);
             il.Emit(OpCodes.Ldfld, instanceField);
 
@@ -1075,20 +1029,20 @@ public class DynamicWrapper
                 methodBuilder.DefineParameter(i + 1, attr, paramInfos[i].Name);
             }
 
-            il.Emit(OpCodes.Callvirt, invoke); // Invoke the delegate
+            il.Emit(OpCodes.Callvirt, instanceMethods[method.Name]);
             if (wrapReturn)
             {
                 il.Emit(OpCodes.Castclass, typeof(object)); // objectToWrap
                 il.Emit(OpCodes.Ldnull); // sourceInterface
-                il.Emit(OpCodes.Call, wrap!); // public static T? Wrap<T>(string targetModId, object? objectToWrap, Type? sourceInterface = null)
+                il.Emit(OpCodes.Call, wrap); // public static T? Wrap<T>(string targetModId, object? objectToWrap, Type? sourceInterface = null)
             }
             il.Emit(OpCodes.Ret);
         }
 
-        // Constructor (do this last because it requires all the delegate fields to have already been defined)
+        // Constructor
         {
             MethodAttributes ctorAttr = MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName;
-            ParameterInfo[] paramInfos = typeof(DynamicWrapperConstructor).GetMethod("Invoke")!.GetParameters();
+            ParameterInfo[] paramInfos = typeof(DynamicWrapperFactory).GetMethod("Invoke")!.GetParameters();
             ConstructorBuilder ctorBuilder = typeBuilder.DefineConstructor(ctorAttr, CallingConventions.HasThis, [.. paramInfos.Select(p => p.ParameterType)]);
 
             for (int i = 0; i < paramInfos.Length; i++)
@@ -1102,26 +1056,15 @@ public class DynamicWrapper
 
             // Init IDynamicWrapper fields
             il.Emit(OpCodes.Ldarg_0);
-            il.Emit(OpCodes.Ldarg_1);
+            il.Emit(OpCodes.Ldstr, wrapperModId);
             il.Emit(OpCodes.Stfld, wrapperModIdField);
             il.Emit(OpCodes.Ldarg_0);
-            il.Emit(OpCodes.Ldarg_2);
+            il.Emit(OpCodes.Ldstr, instanceModId);
             il.Emit(OpCodes.Stfld, instanceModIdField);
             il.Emit(OpCodes.Ldarg_0);
-            il.Emit(OpCodes.Ldarg_3);
+            il.Emit(OpCodes.Ldarg_1);
             il.Emit(OpCodes.Castclass, instanceInterface);
             il.Emit(OpCodes.Stfld, instanceField);
-
-            // Init all delegate fields. Delegates from the dictionary should map 1:1 with the fields
-            MethodInfo dictIndexerGetter = typeof(IDictionary<string, Delegate>).IndexerGetter(null);
-            foreach (var kvp in delegateFields)
-            {
-                il.Emit(OpCodes.Ldarg_0);
-                il.Emit(OpCodes.Ldarg_S, 4); // load the delegate dict
-                il.Emit(OpCodes.Ldstr, kvp.Key);
-                il.Emit(OpCodes.Callvirt, dictIndexerGetter); // get the delegate itself
-                il.Emit(OpCodes.Stfld, kvp.Value);
-            }
 
             il.Emit(OpCodes.Ret);
         }
@@ -1134,7 +1077,7 @@ public class DynamicWrapper
             if (!_assemblySaved)
             {
                 // Run this through the persisted builder so we can save and inspect it in dnSpy if needed.
-                CreateWrapperFactory(_persistedModuleBuilder, wrapperInterface, instanceInterface, delegates, wrapperModId, instanceModId);
+                CreateWrapperFactory(_persistedModuleBuilder, wrapperInterface, instanceInterface, instanceMethods, wrapperModId, instanceModId);
             }
         }
         else
@@ -1143,7 +1086,11 @@ public class DynamicWrapper
         }
 #endif
 
-        return (instance) => (IDynamicWrapper)Activator.CreateInstance(createdType, wrapperModId, instanceModId, instance, delegates)!;
+        // Expression delegate ~20ns vs ~350ns with Activator.CreateInstance()
+        ConstructorInfo ctorInfo = createdType.DeclaredConstructors.First();
+        ParameterExpression[] paramExps = [.. typeof(DynamicWrapperFactory).GetMethod("Invoke")!.GetParameters().Select(p => Expression.Parameter(p.ParameterType))];
+        DynamicWrapperFactory factory = Expression.Lambda<DynamicWrapperFactory>(Expression.Convert(Expression.New(ctorInfo, paramExps), typeof(IDynamicWrapper)), paramExps).Compile();
+        return factory;
     }
 
     private static bool _assemblySaved = false;
