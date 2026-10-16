@@ -3,6 +3,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
+using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
 
 namespace BaseLib.Utils.ModInterop.DynamicWrappers;
@@ -39,6 +40,7 @@ public class DynamicWrapper
     private readonly record struct Declaration(string TargetModId, string SourceModId, Type SourceInterface) { public override readonly string ToString() => $"Target = \"{TargetModId}\", Source = \"{SourceModId}\", {SourceInterface.Name}"; }
     private readonly record struct RegistrationKey(Type TargetInterface, Type SourceInterface) { public override readonly string ToString() => $"\"{SourceInterface.Name}\", Target = {TargetInterface}, Source = {SourceInterface}"; }
     private readonly record struct RegistrationData(Dictionary<string, MethodInfo> TargetMethods, Dictionary<string, MethodInfo> SourceMethods) { public override readonly string ToString() => $"MethodCount = {TargetMethods?.Count.ToString() ?? "null"}"; }
+    private readonly record struct RegistrationLog(LogLevel LogLevel, string Log, string Result);
 
     private static readonly HashSet<Declaration> AttributeDeclarations = [];
     private static readonly HashSet<Declaration> InterfaceDeclarations = [];
@@ -283,19 +285,19 @@ public class DynamicWrapper
 
 
 
-    /// <inheritdoc cref="RegisterTypeInternal(string, Type?, string, Type?, Type, RegistrationType, OrderedDictionary{RegistrationKey, RegistrationData}?, out InteropData?)"/>
+    /// <inheritdoc cref="RegisterTypeInternal(string, Type?, string, Type?, Type, RegistrationType, OrderedDictionary{RegistrationKey, RegistrationData}?, List{RegistrationLog}?, out InteropData?)"/>
     public bool RegisterType(Type? sourceType, Type sourceInterface)
     {
         if (SourceModId == null)
             throw SourceModNullException();
 
-        return RegisterTypeInternal(TargetModId, null, SourceModId, sourceType, sourceInterface, RegistrationType.Explicit, null, out _);
+        return RegisterTypeInternal(TargetModId, null, SourceModId, sourceType, sourceInterface, RegistrationType.Explicit, null, null, out _);
     }
 
-    /// <inheritdoc cref="RegisterTypeInternal(string, Type?, string, Type?, Type, RegistrationType, OrderedDictionary{RegistrationKey, RegistrationData}?, out InteropData?)"/>
+    /// <inheritdoc cref="RegisterTypeInternal(string, Type?, string, Type?, Type, RegistrationType, OrderedDictionary{RegistrationKey, RegistrationData}?, List{RegistrationLog}?, out InteropData?)"/>
     public static bool RegisterType(string targetModId, string sourceModId, Type? sourceType, Type sourceInterface)
     {
-        return RegisterTypeInternal(targetModId, null, sourceModId, sourceType, sourceInterface, RegistrationType.Explicit, null, out _);
+        return RegisterTypeInternal(targetModId, null, sourceModId, sourceType, sourceInterface, RegistrationType.Explicit, null, null, out _);
     }
 
     /// <summary>
@@ -313,23 +315,46 @@ public class DynamicWrapper
     /// Must have same name and implementation as targetMod's (any other interfaces from <paramref name="targetModId"/> that are used as parameters or return types must be mirrored and registered as well).</param>
     /// <param name="regType">The reason for this registration. Supplying <see cref="RegistrationType.Dependency"/> will perform the validation/dependency check without actually registering anything.</param>
     /// <param name="currentlyRegistering">Stores data related to the types that are currently being registered. Used when recursively registering interface dependencies.</param>
+    /// <param name="logs">Stores in-progress logging during recursion, to be logged in order of first started (not first-finished).</param>
     /// <param name="data">The generated data. Will be <see langword="null"/> if registration failed.
     /// Will also be <see langword="null"/> if this was a successful dependency check that is awaiting registration (when using <see cref="RegistrationType.Dependency"/>).</param>
     /// <returns><see langword="true"/> if registration was successful, or this was a dependency that passed it's validation check. Otherwise <see langword="false"/>.</returns>
     /// <exception cref="ArgumentException"><paramref name="sourceInterface"/> is not an interface, or it does not implement all members of the target interface.</exception>
     /// <exception cref="InvalidOperationException">The interface '<paramref name="sourceInterface"/>' has not been registered.</exception>
-    private static bool RegisterTypeInternal(string targetModId, Type? targetInterface, string sourceModId, Type? sourceType, Type sourceInterface, RegistrationType regType, OrderedDictionary<RegistrationKey, RegistrationData>? currentlyRegistering, out InteropData? data)
+    private static bool RegisterTypeInternal(string targetModId, Type? targetInterface, string sourceModId, Type? sourceType, Type sourceInterface, RegistrationType regType,
+        OrderedDictionary<RegistrationKey, RegistrationData>? currentlyRegistering, List<RegistrationLog>? logs, out InteropData? data)
     {
         if (!sourceInterface.IsInterface)
         {
+            PrintLogs(logs);
             throw new ArgumentException(ErrorMsg($"The provided argument '{nameof(sourceInterface)}' of type '{sourceInterface.GetType()}' is not an interface. DynamicWrappers require an interface."), nameof(sourceInterface));
         }
 
+        // The logs are a bit hard to read, but this at least keeps them in order during recursion (while allowing to append 'success' or 'fail' to each log entry)
+        logs ??= [];
+        int logIndex = logs.Count;
+        logs.Add(default); // reserve the index
         string log = $"[DynamicWrappers] Registering: targetModId='{targetModId}', sourceModId='{sourceModId}', sourceType='{sourceType?.Name ?? ""}', sourceInterface='{sourceInterface.Name}', regType='{regType}', result: ";
 
-        static void LogResult(string log, string result)
+        static void LogResult(List<RegistrationLog> logs, int index, LogLevel logLevel, string log, string result, bool forcePrint = false)
         {
-            BaseLibMain.Logger.VeryDebug($"{log}{result}");
+            logs[index] = new(logLevel, log, result);
+
+            if (index == 0 || forcePrint)
+            {
+                PrintLogs(logs);
+            }
+        }
+
+        static void PrintLogs(List<RegistrationLog>? logs)
+        {
+            if (logs == null)
+                return;
+
+            foreach (var (_logLevel, _log, _result) in logs)
+            {
+                BaseLibMain.Logger.LogMessage(_logLevel, $"{_log}{_result}", 1);
+            }
         }
 
         if (targetInterface != null || MirroredInterfaces.TryGetValue(new(targetModId, sourceModId, sourceInterface), out targetInterface) || TryGetTypeFromModId(targetModId, sourceInterface.Name, null, out targetInterface))
@@ -338,7 +363,10 @@ public class DynamicWrapper
             if (InteropLookup.TryGetValue(new(targetInterface, sourceInterface), out data))
             {
                 if (data == null)
+                {
+                    LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Failed (internal logic error)", forcePrint: true);
                     throw new InvalidOperationException(ErrorMsg($"Internal logic error: Trying to register '{sourceInterface}' with '{targetModId}', but it has already been marked as not wrappable."));
+                }
 
                 InteropKey interopKey;
                 if (sourceType != null && sourceType != sourceInterface && !InteropLookup.ContainsKey(interopKey = new(targetInterface, sourceType)))
@@ -346,24 +374,24 @@ public class DynamicWrapper
                     // Already generated for this sourceInterface, we can reuse the data for this concrete type
                     // Nothing to add to reverse lookups; they only require the interface, not concrete types, and it too will have already been generated
                     RegisterClassWithInterface(targetModId, targetInterface, sourceModId, sourceType, sourceInterface, data);
-                    LogResult(log, "Success");
+                    LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Success");
                 }
                 else
                 {
-                    LogResult(log, "Already Registered");
+                    LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Already Registered");
                 }
                 return true;
             }
             else if (sourceType != null && sourceType != sourceInterface)
             {
                 // Register the interface first, then the concrete type can copy that data
-                if (!RegisterTypeInternal(targetModId, targetInterface, sourceModId, null, sourceInterface, regType, null, out data) || data == null)
+                if (!RegisterTypeInternal(targetModId, targetInterface, sourceModId, null, sourceInterface, regType, null, logs, out data) || data == null)
                 {
-                    LogResult(log, "Failed");
+                    LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Failed");
                     return false; // Should only hit this code during auto-registration or a pure validation check, so is safe to return false again here
                 }
                 RegisterClassWithInterface(targetModId, targetInterface, sourceModId, sourceType, sourceInterface, data);
-                LogResult(log, "Success");
+                LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Success");
                 return true;
             }
 
@@ -382,11 +410,11 @@ public class DynamicWrapper
                 {
                     // Check for matching return and param types (or that are mirrored interfaces, which will get wrapped accordingly in the emitted IL)
                     sourceParamTypes = [.. method.GetParameters().Select(pInfo => pInfo.ParameterType)];
-                    if (method.Name == targetMethod.Name && sourceParamTypes.Length == targetParamTypes.Length && MatchTypes(targetModId, targetMethod.ReturnType, sourceModId, method.ReturnType, currentlyRegistering))
+                    if (method.Name == targetMethod.Name && sourceParamTypes.Length == targetParamTypes.Length && MatchTypes(targetModId, targetMethod.ReturnType, sourceModId, method.ReturnType, currentlyRegistering, logs))
                     {
                         for (int i = 0; i < sourceParamTypes.Length; i++)
                         {
-                            if (!MatchTypes(targetModId, targetParamTypes[i], sourceModId, sourceParamTypes[i], currentlyRegistering))
+                            if (!MatchTypes(targetModId, targetParamTypes[i], sourceModId, sourceParamTypes[i], currentlyRegistering, logs))
                             {
                                 return false;
                             }
@@ -395,7 +423,7 @@ public class DynamicWrapper
                     }
                     return false;
 
-                    static bool MatchTypes(string targetModId, Type targetType, string sourceModId, Type sourceType, OrderedDictionary<RegistrationKey, RegistrationData> currentlyRegistering)
+                    static bool MatchTypes(string targetModId, Type targetType, string sourceModId, Type sourceType, OrderedDictionary<RegistrationKey, RegistrationData> currentlyRegistering, List<RegistrationLog> logs)
                     {
                         if (sourceType == targetType || sourceType.IsEnum && targetType.IsEnum && sourceType.GetEnumUnderlyingType() == targetType.GetEnumUnderlyingType())
                         {
@@ -409,7 +437,7 @@ public class DynamicWrapper
                             else if (ModIdsByRegisteredInterface.TryGetValue(targetType, out string? targetId) && targetId == targetModId // Not guaranteed that these are mirrors of each other, but very probable
                                     && ModIdsByRegisteredInterface.TryGetValue(sourceType, out string? sourceId) && sourceId == sourceModId)
                                 return true;
-                            else if (RegisterTypeInternal(targetModId, targetType, sourceModId, null, sourceType, RegistrationType.Dependency, currentlyRegistering, out _))
+                            else if (RegisterTypeInternal(targetModId, targetType, sourceModId, null, sourceType, RegistrationType.Dependency, currentlyRegistering, logs, out _))
                                 return true;
                         }
 
@@ -425,10 +453,11 @@ public class DynamicWrapper
                 else
                 {
                     string msg = $"missing/incorrect signature of '{targetInterface}.{targetMethod.Name}'";
-                    LogResult(log, $"Failed Validation: {msg}");
+                    LogResult(logs, logIndex, LogLevel.VeryDebug, log, $"Failed Validation: {msg}");
 
                     if (regType == RegistrationType.Explicit)
                     {
+                        PrintLogs(logs);
                         throw new ArgumentException(ErrorMsg($"The type '{sourceType ?? sourceInterface}' does not implement the required interface members ({msg})."));
                     }
                     else if (regType == RegistrationType.Dependency)
@@ -443,7 +472,7 @@ public class DynamicWrapper
             if (regType == RegistrationType.Dependency)
             {
                 // Wait for all dependencies to resolve before registering anything. Data is stored in 'currentlyRegistering'.
-                LogResult(log, "Success");
+                LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Success");
                 return true;
             }
 
@@ -474,7 +503,7 @@ public class DynamicWrapper
                 AltLookup[new(targetModId, sourceInterface)] = interopData;
                 AltLookup[new(sourceModId, targetInterface)] = reverseData;
 
-                BaseLibMain.Logger.Info($"[DynamicWrappers] Built DynamicWrappers for interop between '{sourceModId}' and '{targetModId}' with interface '{targetInterface.Name}'");
+                logs.Add(new(LogLevel.Info, $"[DynamicWrappers] Built DynamicWrappers for interop between '{sourceModId}' and '{targetModId}' with interface '{targetInterface.Name}'", ""));
 
                 TypeRegistered?.Invoke(new TypeRegisteredEventArgs(targetModId, targetInterface, sourceModId, sourceType, sourceInterface));
 
@@ -489,7 +518,7 @@ public class DynamicWrapper
 
                     if (otherModKvps.Length > 0)
                     {
-                        BaseLibMain.Logger.Debug($"[DynamicWrappers] Auto-registering interop between '{sourceModId}' and {otherModKvps.Length} other mod(s) registered with '{targetInterface}'");
+                        logs.Add(new(LogLevel.Debug, $"[DynamicWrappers] Auto-registering interop between '{sourceModId}' and {otherModKvps.Length} other mod(s) registered with '{targetInterface}'", ""));
 
                         foreach (var altKvp in otherModKvps)
                         {
@@ -508,7 +537,7 @@ public class DynamicWrapper
                                     }
                                 }
                             }
-                            RegisterTypeInternal(otherModId, altKvp.Value.TargetInterface, sourceModId, null, sourceInterface, RegistrationType.Auto, null, out _);
+                            RegisterTypeInternal(otherModId, altKvp.Value.TargetInterface, sourceModId, null, sourceInterface, RegistrationType.Auto, null, logs, out _);
                         }
                     }
                 }
@@ -518,19 +547,23 @@ public class DynamicWrapper
             }
 
             if (data == null)
+            {
+                LogResult(logs, logIndex, LogLevel.VeryDebug, log, $"Failed (internal logic error)", forcePrint: true);
                 throw new InvalidOperationException(ErrorMsg($"Internal logic error: '{nameof(data)}' should not be null"));
+            }
 
-            LogResult(log, "Success");
+            LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Success");
             return true;
         }
         else if (regType != RegistrationType.Explicit)
         {
-            LogResult(log, "Failed");
+            LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Failed");
             data = null;
             return false;
         }
         else
         {
+            LogResult(logs, logIndex, LogLevel.VeryDebug, log, "Failed", forcePrint: true);
             throw new InvalidOperationException(ErrorMsg($"The interface '{sourceInterface.Name}' could not be found in '{targetModId}'."));
         }
     }
@@ -700,7 +733,7 @@ public class DynamicWrapper
                     if (!AltLookup.TryGetValue(srcKey, out InteropData? tempData))
                     {
                         if (!TryGetModIdFromType(srcInterface, out string? srcModId)
-                            || !RegisterTypeInternal(targetModId, null, srcModId, sourceType, srcInterface, RegistrationType.OnDemand, null, out tempData)) // Do not supply targetInterface here
+                            || !RegisterTypeInternal(targetModId, null, srcModId, sourceType, srcInterface, RegistrationType.OnDemand, null, null, out tempData)) // Do not supply targetInterface here
                         {
                             // srcInterface is not wrappable for the target mod
                             if (targetInterface != null)
