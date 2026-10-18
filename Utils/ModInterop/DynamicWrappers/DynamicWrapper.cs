@@ -141,7 +141,7 @@ public class DynamicWrapper
     /// <br/> Use this in the rare case that the target assembly defines multiple interfaces of the same name.</param>
     public static void DeclareInterface(string targetModId, string sourceModId, Type sourceInterface, string? targetInterfaceFullName = null)
     {
-        DeclareInterfaceInternal(targetModId, sourceModId, sourceInterface, targetInterfaceFullName);
+        DeclareInterfaceInternal(targetModId, null, sourceModId, sourceInterface, targetInterfaceFullName);
     }
 
     /// <inheritdoc cref="DeclareInterface(string, string, Type, string?)"/>
@@ -150,7 +150,7 @@ public class DynamicWrapper
     {
         foreach (Type sourceInterface in sourceInterfaces)
         {
-            DeclareInterfaceInternal(targetModId, sourceModId, sourceInterface);
+            DeclareInterfaceInternal(targetModId, null, sourceModId, sourceInterface);
         }
     }
 
@@ -182,15 +182,15 @@ public class DynamicWrapper
     }
 
     /// <inheritdoc cref="DeclareInterface(string, string, Type, string?)"/>
-    private static void DeclareInterfaceInternal(string targetModId, string sourceModId, Type sourceInterface, string? targetInterfaceFullName = null)
+    private static void DeclareInterfaceInternal(string targetModId, Type? targetInterface, string sourceModId, Type sourceInterface, string? targetInterfaceFullName = null)
     {
         Declaration declaration = new(targetModId, sourceModId, sourceInterface);
 
-        if (InterfaceDeclarations.Contains(declaration) && MirroredInterfaces.TryGetValue(declaration, out Type? targetInterface))
+        if (InterfaceDeclarations.Contains(declaration) && MirroredInterfaces.TryGetValue(declaration, out targetInterface))
         {
             BaseLibMain.Logger.Warn($"[DynamicWrappers] Interface '{sourceInterface}' has already been declared with target interface '{targetInterface}'");
         }
-        else if (TryGetTypeFromModId(targetModId, sourceInterface.Name, targetInterfaceFullName, out targetInterface))
+        else if (targetInterface != null || TryGetTypeFromModId(targetModId, sourceInterface.Name, targetInterfaceFullName, out targetInterface))
         {
             InterfaceDeclarations.Add(declaration);
             MirroredInterfaces[declaration] = targetInterface;
@@ -212,7 +212,7 @@ public class DynamicWrapper
         if (attr == null)
             return;
 
-        DeclareInterfaceInternal(attr.TargetModId, attr.SourceModId, sourceInterface, attr.TargetInterfaceFullName);
+        DeclareInterfaceInternal(attr.TargetModId, null, attr.SourceModId, sourceInterface, attr.TargetInterfaceFullName);
         AttributeDeclarations.Add(new(attr.TargetModId, attr.SourceModId, sourceInterface));
     }
 
@@ -579,7 +579,8 @@ public class DynamicWrapper
         Explicit,
         OnDemand,
         Auto,
-        Dependency
+        Dependency,
+        Sync
     }
 
 
@@ -866,13 +867,45 @@ public class DynamicWrapper
 
 
 
-    // Here is the meat
-
     internal static void RegisterDynamicAssembly()
     {
         // Unsure about this...if any caller wants to know, I think "BaseLib" is the wrong answer...
         ModManager.AssociateAssemblyWithMod(BaseLibMain.ModId, _assemblyBuilder);
     }
+
+    /// <summary>
+    /// If <see cref="DynamicWrapper"/> is defined in a another mod (and that mod is loaded first), call this to sync both implementations.
+    /// </summary>
+    /// <remarks>Prevents lookup tables being split across different mods, which may break interopability in some cases.</remarks>
+    /// <param name="otherModId">The other mod that defines <see cref="DynamicWrapper"/>.</param>
+    internal static void SyncWithAnotherImplementation(string otherModId)
+    {
+        // Untested
+        if (TryGetTypeFromModId(otherModId, nameof(DynamicWrapper), null, out Type? other))
+        {
+            other.GetEvent(nameof(TypeRegistered), BindingFlags.Static)!.AddEventHandler(null, (TypeRegisteredEventHandler)Sync);
+            TypeRegistered += other.GetMethod(nameof(Sync), BindingFlags.Static | BindingFlags.NonPublic, [typeof(TypeRegisteredEventArgs)])!.CreateDelegate<TypeRegisteredEventHandler>();
+        }
+        else
+        {
+            BaseLibMain.Logger.Warn($"[DynamicWrappers] Could not sync with mod {otherModId}");
+        }
+    }
+
+    private static void Sync(TypeRegisteredEventArgs e)
+    {
+        DeclareInterfaceInternal(e.TargetModId, e.TargetInterface, e.SourceModId, e.SourceInterface, e.TargetInterface.FullName);
+        RegisterTypeInternal(e.TargetModId, e.TargetInterface, e.SourceModId, e.SourceType, e.SourceInterface, RegistrationType.Sync, null, null, out _);
+    }
+
+
+
+
+
+
+
+
+    // Here is the meat
 
     const string AssemblyName = "DynamicWrappers";
 

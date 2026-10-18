@@ -11,13 +11,13 @@ public delegate void TypeRegisteredEventHandler(TypeRegisteredEventArgs e);
 /// </summary>
 public class TypeRegisteredEventArgs : EventArgs
 {
-    internal TypeRegisteredEventArgs(string targetModId, Type targetInterface, string sourceModId, Type? registeredType, Type registeredInterface)
+    internal TypeRegisteredEventArgs(string targetModId, Type targetInterface, string sourceModId, Type? sourceType, Type sourceInterface)
     {
         TargetModId = targetModId;
         TargetInterface = targetInterface;
         SourceModId = sourceModId;
-        RegisteredType = registeredType;
-        RegisteredInterface = registeredInterface;
+        SourceType = sourceType;
+        SourceInterface = sourceInterface;
     }
 
     /// <summary>
@@ -38,10 +38,10 @@ public class TypeRegisteredEventArgs : EventArgs
     /// <summary>
     /// The type that was registered, or <see langword="null"/> if just the interface alone was registered.
     /// </summary>
-    public Type? RegisteredType { get; }
+    public Type? SourceType { get; }
 
     /// <summary>
     /// The interface that was registered, that is a mirror of TargetInterface.
     /// </summary>
-    public Type RegisteredInterface { get; }
+    public Type SourceInterface { get; }
 }
