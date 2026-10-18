@@ -35,7 +35,7 @@ public class DynamicWrapper
 
     private readonly record struct InteropKey(Type TargetInterface, Type SourceType) { public override readonly string ToString() => $"{{Target = \"{ModIdFromTypeOrDefault(TargetInterface)}\", {TargetInterface.Name}}}, {{Source = \"{ModIdFromTypeOrDefault(SourceType)}\", {SourceType.Name}}}"; }
     private readonly record struct AltKey(string TargetModId, Type SourceType) { public override readonly string ToString() => $"Target = \"{TargetModId}\", Source = \"{ModIdFromTypeOrDefault(SourceType)}\", {SourceType.Name}, {SourceType}"; }
-    private record class InteropData(string SourceModId, Type SourceInterface, Type TargetInterface, DynamicWrapperFactory WrapperFactory) { public override string ToString() => $"\"{SourceModId}\", {SourceInterface.Name}, {TargetInterface}"; }
+    private record class InteropData(string SourceModId, Type SourceInterface, Type TargetInterface, DynamicWrapperFactory Wrap) { public override string ToString() => $"\"{SourceModId}\", {SourceInterface.Name}, {TargetInterface}"; }
 
     private readonly record struct Declaration(string TargetModId, string SourceModId, Type SourceInterface) { public override readonly string ToString() => $"Target = \"{TargetModId}\", Source = \"{SourceModId}\", {SourceInterface.Name}"; }
     private readonly record struct RegistrationKey(Type TargetInterface, Type SourceInterface) { public override readonly string ToString() => $"\"{SourceInterface.Name}\", Target = {TargetInterface}, Source = {SourceInterface}"; }
@@ -44,7 +44,9 @@ public class DynamicWrapper
 
     private static readonly HashSet<Declaration> AttributeDeclarations = [];
     private static readonly HashSet<Declaration> InterfaceDeclarations = [];
-#if DEBUG
+
+#if DEBUG && false // These sorted dicts are awfully slow. Dont risk using them unless specifically debugging, even for the tiny chance that something actually makes heavy use of the system - you'll never know why performance is tanking.
+#warning SortedLists are in use - please remember to disable them once finished debugging.
     private static readonly SortedDictionary<Declaration, Type> MirroredInterfaces = new(Comparer<Declaration>.Create((x, y) => (x.TargetModId + x.SourceModId + x.SourceInterface.Name).CompareTo(y.TargetModId + y.SourceModId + y.SourceInterface.Name)));
     private static readonly SortedDictionary<Type, string> ModIdsByRegisteredInterface = new(Comparer<Type>.Create((x, y) => (x.Name + x.FullName).CompareTo(y.Name + y.FullName)));
     private static readonly SortedDictionary<InteropKey, InteropData?> InteropLookup = new(Comparer<InteropKey>.Create((x, y) => (ModIdFromTypeOrDefault(x.TargetInterface, "zzzzz") + x.TargetInterface.Name + x.TargetInterface.FullName + ModIdFromTypeOrDefault(x.SourceType, "zzzzz") + x.SourceType.Name + x.SourceType.FullName).CompareTo(ModIdFromTypeOrDefault(y.TargetInterface, "zzzzz") + y.TargetInterface.Name + y.TargetInterface.FullName + ModIdFromTypeOrDefault(y.SourceType, "zzzzz") + y.SourceType.Name + y.SourceType.FullName)));
@@ -665,11 +667,11 @@ public class DynamicWrapper
 
         if (TryFindWrapper(targetModId, targetInterface, sourceType, sourceInterface, returnNullIfNotWrapped, out InteropData? data))
         {
-            if (targetInterface == null && sourceType.IsAssignableTo(data.TargetInterface)) // If targetInterface is not-null, then this has already been checked
+            if (targetInterface == null && sourceType.IsAssignableTo(data.TargetInterface)) // If (targetInterface != null), then this has already been checked
             {
                 return objectToWrap;
             }
-            return data.WrapperFactory(objectToWrap); // Apply wrapper
+            return data.Wrap(objectToWrap); // Apply wrapper
         }
 
         if (returnNullIfNotWrapped)
@@ -1024,17 +1026,17 @@ public class DynamicWrapper
         foreach (PropertyInfo propInfo in interfaceProps)
         {
             PropertyBuilder propBuilder = typeBuilder.DefineProperty(propInfo.Name, PropertyAttributes.None, propInfo.PropertyType, Type.EmptyTypes);
+            bool requireWrapping = RequireWrapping(propInfo.PropertyType, wrapperModId);
 
             if (propInfo.GetMethod != null)
             {
                 MethodBuilder propGetter = typeBuilder.DefineMethod(propInfo.GetMethod.Name, getterSetterAttributes, CallingConventions.HasThis, propInfo.PropertyType, Type.EmptyTypes);
                 propBuilder.SetGetMethod(propGetter);
 
-                bool wrapReturn = RequireWrapping(propInfo.PropertyType, wrapperModId);
                 MethodInfo wrap = null!;
 
                 ILGenerator il = propGetter.GetILGenerator();
-                if (wrapReturn)
+                if (requireWrapping)
                 {
                     wrap = wrapOpenGeneric.MakeGenericMethod(propInfo.PropertyType); // T
                     il.Emit(OpCodes.Ldarg_0);
@@ -1044,7 +1046,7 @@ public class DynamicWrapper
                 il.Emit(OpCodes.Ldfld, instanceField);
 
                 il.Emit(OpCodes.Callvirt, instanceMethods[propGetter.Name]);
-                if (wrapReturn)
+                if (requireWrapping)
                 {
                     il.Emit(OpCodes.Castclass, typeof(object)); // objectToWrap
                     il.Emit(OpCodes.Ldnull); // sourceInterface
@@ -1062,7 +1064,7 @@ public class DynamicWrapper
                 il.Emit(OpCodes.Ldarg_0);
                 il.Emit(OpCodes.Ldfld, instanceField);
 
-                if (RequireWrapping(propInfo.PropertyType, wrapperModId))
+                if (requireWrapping)
                 {
                     il.Emit(OpCodes.Ldarg_0);
                     il.Emit(OpCodes.Ldfld, instanceModIdField); // targetModId
@@ -1178,10 +1180,10 @@ public class DynamicWrapper
         }
 #endif
 
-        // Expression delegate ~20ns vs ~350ns with Activator.CreateInstance()
-        ConstructorInfo ctorInfo = createdType.DeclaredConstructors.First();
-        ParameterExpression[] paramExps = [.. typeof(DynamicWrapperFactory).GetMethod("Invoke")!.GetParameters().Select(p => Expression.Parameter(p.ParameterType))];
-        DynamicWrapperFactory factory = Expression.Lambda<DynamicWrapperFactory>(Expression.Convert(Expression.New(ctorInfo, paramExps), typeof(IDynamicWrapper)), paramExps).Compile();
+        // Expression delegate ~20ns vs ~350ns using Activator.CreateInstance()
+        ConstructorInfo ctor = createdType.DeclaredConstructors.First();
+        ParameterExpression[] args = [.. typeof(DynamicWrapperFactory).GetMethod("Invoke")!.GetParameters().Select(p => Expression.Parameter(p.ParameterType))];
+        DynamicWrapperFactory factory = Expression.Lambda<DynamicWrapperFactory>(Expression.Convert(Expression.New(ctor, args), typeof(IDynamicWrapper)), args).Compile();
         return factory;
     }
 
@@ -1197,7 +1199,7 @@ public class DynamicWrapper
     {
         // I dont think this belongs on the public API, but can call this via reflection from another mod if needed
 #if DEBUG
-        if (_assemblySaved)
+        if (_assemblySaved) // Can only be saved once
             return false;
 
         _persistedAssemblyBuilder.Save(filename);
